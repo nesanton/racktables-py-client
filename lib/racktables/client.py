@@ -1,11 +1,10 @@
-#!/opt/python/bin/python2.7
+#!/bin/env python
 # -*- coding: utf-8 -*-
 
 import re
 import urllib
 import json
 import logging
-import pprint
 
 module_logger = logging.getLogger('racktables_client')
 
@@ -59,7 +58,7 @@ class RacktablesClient:
             args['andor'] = 'and'
 
         objects = {}
-        raw_objects = self.make_request('get_depot', args)
+        raw_objects = self.make_request('get_depot', args, response_only=False)
 
         if alt_key is not None:
             for object_id, object_data in raw_objects.items():
@@ -87,11 +86,15 @@ class RacktablesClient:
         return rt_object
 
 
+    def add_object_log(self, object_id, logentry):
+        self.make_request('add_object_log', {'object_id': object_id, 'logentry': logentry})
+
+
     def add_object(self, object_name,
                    object_asset_no=None,
                    object_label=None,
                    object_type_id=4,
-                   comment=None,
+                   object_comment=None,
                    taglist=[],
                    attrs={}):
         "Adds a new object to Racktables. The only required parameter is the object name."
@@ -107,25 +110,27 @@ class RacktablesClient:
             args['object_label'] = object_label
 
         new_rt_object    = self.make_request('add_object', args)
+        if not new_rt_object:
+            return None
         new_rt_object_id = new_rt_object['id']
 
         self.logger.info('created new object, id: %s', new_rt_object_id)
 
         # add any attrs or comment
-        if comment or attrs:
+        if object_comment or attrs:
             self.logger.info('adding comment/attributes for new object id %s', new_rt_object_id)
             self.edit_object(object_id       = new_rt_object_id,
                              object_name     = object_name,
                              object_asset_no = object_asset_no,
                              object_label    = object_label,
                              object_type_id  = object_type_id,
-                             object_comment  = comment,
+                             object_comment  = object_comment,
                              attrs           = attrs)
 
         # add tags if specified
         if taglist:
             self.logger.info('adding tags for new object id %s', new_rt_object_id)
-            self.update_object_tags(taglist)
+            self.update_object_tags(new_rt_object_id, taglist)
 
         return new_rt_object
 
@@ -168,6 +173,27 @@ class RacktablesClient:
 
         return updated_object
 
+    def edit_object_safe(self, object_id, append_comment=True, **kwargs):
+        "Edits an existing object in Racktables. Attributes not passed WILL NOT be erased."
+
+        # remove values explicitly set to None
+        kwargs = {k: v for k, v in kwargs.iteritems() if v is not None}
+        obj = self.get_object(object_id)
+
+        args = { 'object_id':       object_id,
+                 'object_type_id':  kwargs.get('object_type_id', obj['objtype_id']),
+                 'object_name':     kwargs.get('object_name', obj['name']),
+                 'object_asset_no': kwargs.get('object_asset_no', obj['asset_no']),
+                 'object_label':    kwargs.get('object_label', obj['label']),
+                 'object_comment':  kwargs.get('object_comment', obj['comment']),
+                 'attrs':           kwargs.get('attrs', {})}
+
+        if append_comment and obj['comment']:
+            new_comment = kwargs.get('object_comment', '')
+            if new_comment:
+                args['object_comment'] = obj['comment'] + '\n\n' + new_comment
+
+        return self.edit_object(**args)
 
     def delete_object(self, object_id):
         "Deletes one object from Racktables."
@@ -191,14 +217,38 @@ class RacktablesClient:
         updated_object = self.make_request('add_object_ip_allocation', {'object_id': object_id,
                                                                        'ip':        ip_address,
                                                                        'bond_name': os_interface})
-
-        ip_addresses = map(lambda address: address['addrinfo']['ip'], updated_object['ipv4'].values())
+        if updated_object:
+            ip_addresses = map(lambda address: address['addrinfo']['ip'], updated_object['ipv4'].values())
+        else:
+            return success
 
         if ip_address in ip_addresses:
             self.logger.info('updated object id %s interface %s to IP address %s',
                         object_id, os_interface, ip_address)
             success = True
 
+        return success
+
+
+    def edit_object_ipv4_address(self, object_id, ip_address, os_interface):
+        "Add an IPv4 address to an object."
+
+        success = False
+
+        # response is the get_object page
+        updated_object = self.make_request('edit_object_ip_allocation', {'object_id': object_id,
+                                                                         'ip':        ip_address,
+                                                                         'bond_name': os_interface})
+        if updated_object:
+            ip_addresses = {a['addrinfo']['ip']: a['osif'] for a in updated_object['ipv4'].values()}
+        else:
+            return success
+
+        if ip_address in ip_addresses:
+            self.logger.info('updated object id %s interface %s to IP address %s',
+                        object_id, os_interface, ip_address)
+            if ip_addresses[ip_address] == os_interface:
+                success = True
         return success
 
 
@@ -210,8 +260,10 @@ class RacktablesClient:
         # response is the get_object page
         updated_object = self.make_request('delete_object_ip_allocation', {'object_id': object_id,
                                                                            'ip':        ip_address})
-
-        remaining_ips = map(lambda address: address['addrinfo']['ip'], updated_object['ipv4'].values())
+        if updated_object:
+            remaining_ips = map(lambda address: address['addrinfo']['ip'], updated_object['ipv4'].values())
+        else:
+            return success
 
         if ip_address not in remaining_ips:
             self.logger.info('removed IP address %s from object id %s',
@@ -257,6 +309,27 @@ class RacktablesClient:
                              port_id, object_id)
             success = True
 
+        return success
+
+
+    def update_object_port(self, object_id, port_id, port_name,
+                           port_label, port_l2address, port_reservation_comment, port_type_id='1-24'):
+        success = False
+        updated_object = self.make_request('update_port',
+                                           {'object_id': object_id,
+                                            'port_id':   port_id,
+                                            'port_name': port_name,
+                                            'port_type_id': port_type_id,
+                                            'port_label': port_label,
+                                            'port_l2address': port_l2address,
+                                            'port_reservation_comment': port_reservation_comment})
+        for port in updated_object['ports'].values():
+            if port['id'] == port_id:
+                if port['name'] == port_name and \
+                   port['label'] == port_label and \
+                   port['l2address'].lower() == port_l2address.lower() and \
+                   port['reservation_comment'] == port_reservation_comment:
+                    success = True
         return success
 
 
@@ -403,7 +476,7 @@ class RacktablesClient:
         tag_ids = []
 
         # get the list of tags
-        site_tags = self.get_tags()
+        site_tags = self.get_tags(use_cache=False)
 
         for tag_name in tag_names:
             self.logger.debug('determining tag id for tag "%s"', tag_name)
@@ -495,6 +568,44 @@ class RacktablesClient:
         return chapter
 
 
+    def add_chapter_entry(self, chapter_id, value):
+        "Add a value to chapter with chapter_id"
+
+        # capture raw response so we can look for the new chapter_no
+        entry_id = self.make_request('add_chapter_entry', {'chapter_no': chapter_id,
+                                                'dict_value': value})['entry_id']
+
+        self.logger.info('added new entry %s (id %s) to chapter id %s' % (value,
+                                                                          entry_id,
+                                                                          chapter_id))
+        return entry_id
+
+
+    def add_tag(self, tag_name):
+        "Add a value to chapter with chapter_id"
+
+        # capture raw response so we can look for the new chapter_no
+        tag_id = self.make_request('add_tag', {'tag_name': tag_name})['tag_id']
+
+        self.logger.info('added new tag %s with id %s' % (tag_name, tag_id))
+        return tag_id
+
+
+    def get_attributes(self):
+        return self.make_request('get_attributes', {})
+
+
+    def get_chapter_entry_id(self, chapter_id, value):
+        for k, v in self.get_chapter(chapter_id, raw_values=True).iteritems():
+            if v == value:
+                return k
+        return None
+
+
+    def search(self, term):
+        return self.make_request('search', {'term': term}, False)
+
+
     def make_request(self, method, args=None, response_only=True):
 
         # method first
@@ -508,7 +619,9 @@ class RacktablesClient:
             safe_request_uri = safe_request_uri + '&' + params
 
         self.logger.debug('requesting: ' + safe_request_uri)
-        http_body = urllib.urlopen(request_uri).read()
+        u = urllib.urlopen(request_uri)
+        http_body = u.read()
+        ret_code = u.getcode()
         decoded = json.loads(http_body)
 
         # TODO: some error handling here
@@ -550,146 +663,3 @@ class RacktablesClientException(Exception):
 
     def __init__(self, message):
         self.message = message
-
-
-def get_auth(pw_file=None, username=None):
-
-    """Return username and password as a dictionary.
-
-    If a filename is passed, the username and password are read from the file.
-    If neither a filename nor username are passed, the current UNIX user is assumed."""
-
-    auth = {}
-
-    # get username and password from file
-    if pw_file is not None:
-        module_logger.debug('auth data will be read from %s', pw_file)
-        auth = read_password_file(pw_file)
-
-    else:
-        import getpass
-
-        if username is not None:
-            auth['username'] = username
-
-        else:
-            auth['username'] = getpass.getuser()
-            module_logger.debug('using current UNIX user %s for auth', auth['username'])
-
-        auth['password'] = getpass.getpass('enter LDAP password for user "%s": ' % auth['username'])
-
-    return auth
-
-
-def read_password_file(pw_file):
-    import yaml
-
-    auth_data = {}
-
-    file_data = yaml.safe_load(file(pw_file))
-
-    auth_data['username'] = file_data['username']
-    auth_data['password'] = file_data['password']
-
-    return auth_data
-
-
-if __name__ == "__main__":
-
-    import yaml
-    import os
-    import argparse
-
-    parser = argparse.ArgumentParser(description='Racktables Client')
-
-    parser.add_argument('-a', '--api',
-                        default='https://racktables/api.php',
-                        help='base URI of Racktables API')
-
-    parser.add_argument('-p', '--password-file',
-                        default=os.getenv('HOME')+'/.racktables',
-                        help='file to get HTTP username and password from, defaults to $HOME/.racktables')
-
-    parser.add_argument('--get-depot',
-                        action='store_true',
-                        help='list the number of objects in Racktables')
-
-    parser.add_argument('--get-object-id',
-                        help='get basic information on an object')
-
-    parser.add_argument('--get-tags',
-                        action='store_true',
-                        help='show user-defined tags')
-
-    parser.add_argument('--loglevel')
-
-    args = parser.parse_args()
-
-    # set up logging
-    ch = logging.StreamHandler()
-
-    formatter = logging.Formatter('[%(name)s] [%(levelname)s] %(message)s')
-    ch.setFormatter(formatter)
-    module_logger.addHandler(ch)
-    if args.loglevel:
-        module_logger.setLevel(args.loglevel)
-
-    # get auth data
-    auth = {}
-
-    if os.path.exists(args.password_file):
-        auth = get_auth(pw_file=args.password_file)
-    else:
-        auth = get_auth()
-
-    rt_client = RacktablesClient(args.api, auth['username'], auth['password'])
-
-    if args.get_depot:
-        all_objects = rt_client.get_objects()
-        print 'there are %s objects in racktables' % len(all_objects)
-
-    if args.get_object_id:
-        print 'getting object ID ' + args.get_object_id
-        rt_object = rt_client.get_object(args.get_object_id, True, True)
-        rt_object_allocation = rt_client.get_object_allocation(args.get_object_id)
-        print "name: {0}\nFQDN: {1}\nHW type: {2}".format(rt_object['name'],
-                                                          rt_object['attrs']['FQDN']['a_value'],
-                                                          rt_object['attrs']['HW type']['a_value'])
-
-        print 'tags:'
-        for tagdata in rt_object['etags'].values():
-            print ' {0} (explicit)'.format(tagdata['tag'])
-
-        for tagdata in rt_object['itags'].values():
-            print ' {0} (implicit)'.format(tagdata['tag'])
-
-        print 'allocation:'
-        for rack_id, rack_data in rt_object_allocation['racks'].items():
-            print ' rack id {0}:'.format(rack_id)
-            for position, idxes in rt_object_allocation['racks'][rack_id].items():
-                print '   pos: {0}'.format(position)
-                for idx in idxes.keys():
-                    print '    idx: {0}'.format(idx)
-
-        print 'zero-U allocation:'
-        for rack_id in rt_object_allocation['zerou_racks']:
-            print ' rack id {0}'.format(rack_id)
-
-
-    if args.get_tags:
-
-        # recursive function to print out a hierarchy
-        def dump_tag_tree(tree, indent=0):
-            for node in tree.values():
-                text = '{0} (id {1})'.format(node['tag'], node['id'])
-                print text.rjust(len(text) + indent)
-                dump_tag_tree(node['kids'], indent + 2)
-
-        print "\nuser-defined tags:"
-        print   '=================='
-
-        tags = rt_client.get_tags(True)
-        dump_tag_tree(tags, 2)
-
-        print "==================\n"
-
