@@ -2,8 +2,10 @@
 # -*- coding: utf-8 -*-
 
 import re
-import urllib
 import json
+import base64
+import urllib
+import urllib2
 import logging
 
 module_logger = logging.getLogger('racktables_client')
@@ -13,24 +15,11 @@ class RacktablesClient:
     def __init__(self, api, username=None, password=None):
 
         self.logger = logging.getLogger('racktables_client')
-
         self.logger.debug('using API base URI of %s', api)
-
-        # keep a version of the API that's safe to print and record
-        no_password_api = api
-
-        # inject username and password if given
-        if username is not None and password is not None:
-            self.logger.debug('adding username and password to API URL')
-            m = re.search('^(https?://)(.*)$', api)
-            api             = m.group(1) + username + ':' + password + '@' + m.group(2)
-            no_password_api = m.group(1) + username + ':*PASSWORD*@'       + m.group(2)
-
-        self.api             = api
-        self.no_password_api = no_password_api
-
+        self.api = api
         self.chapter_cache   = {}
         self.tags_list_cache = None
+        self.auth_string = base64.b64encode('%s:%s' % (username, password))
 
 
     def get_objects(self, alt_key=None, include_attrs=False, type_filter=None, tag_filter=[]):
@@ -610,18 +599,18 @@ class RacktablesClient:
 
         # method first
         request_uri = self.api + "?method=" + method
-        safe_request_uri = self.no_password_api + "?method=" + method
 
         # add any additional parameters
         if args is not None:
             params = urllib.urlencode(args, doseq=True)
-            request_uri = request_uri + '&' + params
-            safe_request_uri = safe_request_uri + '&' + params
+            request_uri += '&{params}'.format(params=params)
 
-        self.logger.debug('requesting: ' + safe_request_uri)
-        u = urllib.urlopen(request_uri)
-        http_body = u.read()
-        ret_code = u.getcode()
+        self.logger.debug('requesting: {url}'.format(url=request_uri))
+        request = urllib2.Request(request_uri)
+        request.add_header("Authorization", "Basic {auth}".format(auth=self.auth_string))
+        result = urllib2.urlopen(request)
+        http_body = result.read()
+        # ret_code = result.getcode()
         decoded = json.loads(http_body)
 
         # TODO: some error handling here
