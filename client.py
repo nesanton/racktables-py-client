@@ -166,7 +166,9 @@ class RacktablesClient:
         "Edits an existing object in Racktables. Attributes not passed WILL NOT be erased."
 
         # remove values explicitly set to None
-        kwargs = {k: v for k, v in kwargs.iteritems() if v is not None}
+        for k, v in kwargs.iteritems():
+            if v is not None:
+                kwargs[k] = v
         obj = self.get_object(object_id)
 
         args = { 'object_id':       object_id,
@@ -229,7 +231,9 @@ class RacktablesClient:
                                                                          'ip':        ip_address,
                                                                          'bond_name': os_interface})
         if updated_object:
-            ip_addresses = {a['addrinfo']['ip']: a['osif'] for a in updated_object['ipv4'].values()}
+            ip_addresses = {}
+            for a in updated_object['ipv4'].values():
+                ip_addresses[a['addrinfo']['ip']] = a['osif']
         else:
             return success
 
